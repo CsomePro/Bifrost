@@ -12,7 +12,7 @@ from .service import service
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 
-app = FastAPI(title="Proxy Pool", version="0.1.0")
+app = FastAPI(title="Bifrost", version="0.1.0")
 templates = Jinja2Templates(directory="/app/templates")
 
 

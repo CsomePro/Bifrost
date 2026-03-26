@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: ghcr.io/csomepro/proxy-pool
+  IMAGE_NAME: ghcr.io/csomepro/bifrost
 
 jobs:
   docker:
