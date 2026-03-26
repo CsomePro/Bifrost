@@ -1,6 +1,6 @@
-# proxy-pool
+# Bifrost
 
-`proxy-pool` is a small service for:
+`Bifrost` is a small service for:
 
 - importing common `v2ray/v2raya` subscription formats
 - assigning a fixed local port to every parsed node
@@ -28,11 +28,15 @@
 ## Run
 
 ```bash
-docker build -t proxy-pool .
-docker run --rm -p 9080:9080 -v $(pwd)/data:/app/data proxy-pool
+docker build -t bifrost .
+docker run --rm -p 9080:9080 -v $(pwd)/data:/app/data bifrost
 ```
 
 Then open `http://127.0.0.1:9080`.
+
+Compatibility note:
+
+- the runtime service identifier remains `proxy-pool` for now
 
 Runtime model:
 
@@ -74,7 +78,7 @@ The API returns:
 This service is intended to be published from its own repository to:
 
 ```text
-ghcr.io/csomepro/proxy-pool
+ghcr.io/csomepro/bifrost
 ```
 
 Included GitHub Actions:
