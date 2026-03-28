@@ -7,13 +7,24 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from .config import settings
-from .models import NodeBulkUpdateRequest, NodeUpdateRequest, SubscriptionCreate
+from .models import NodeBulkUpdateRequest, NodeUpdateRequest, RegistrationCallbackPayload, SubscriptionCreate
 from .service import service
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 
 app = FastAPI(title="Bifrost", version="0.1.0")
 templates = Jinja2Templates(directory="/app/templates")
+
+
+def _require_callback_auth(request: Request) -> None:
+    expected = str(settings.callback_api_key or "").strip()
+    if not expected:
+        return
+
+    header_name = str(settings.callback_api_key_header or "X-API-Key").strip() or "X-API-Key"
+    provided = request.headers.get(header_name)
+    if provided != expected:
+        raise HTTPException(status_code=401, detail="invalid callback api key")
 
 
 @app.on_event("startup")
@@ -120,3 +131,21 @@ async def api_next_proxy(
         return {"success": True, **lease.model_dump()}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/callbacks/registration")
+async def api_registration_callback(payload: RegistrationCallbackPayload, request: Request) -> dict:
+    _require_callback_auth(request)
+    try:
+        node = service.record_registration_callback(payload)
+        return {
+            "success": True,
+            "node_id": node.id,
+            "bound_port": node.bound_port,
+            "registration_success_count": node.registration_success_count,
+            "registration_failed_count": node.registration_failed_count,
+            "registration_consecutive_failures": node.registration_consecutive_failures,
+            "registration_cooldown_until": node.registration_cooldown_until,
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

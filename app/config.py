@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     strategy: str = "random"
     lease_ttl_secs: int = 600
     cleanup_interval_secs: int = 30
+    callback_api_key: str = ""
+    callback_api_key_header: str = "X-API-Key"
+    registration_fail_threshold: int = 3
+    registration_cooldown_secs: int = 1800
     healthcheck_url: str = "https://www.gstatic.com/generate_204"
     healthcheck_timeout: int = 10
     healthcheck_interval_secs: int = 300

@@ -6,13 +6,14 @@ import logging
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import httpx
 from curl_cffi import requests as cffi_requests
 
 from .config import settings
 from .engine import SingboxEngine
-from .models import AppState, NodeRecord, ProxyLease, SubscriptionCreate, SubscriptionRecord, utc_now
+from .models import AppState, NodeRecord, ProxyLease, RegistrationCallbackPayload, SubscriptionCreate, SubscriptionRecord, utc_now
 from .parsers import parse_subscription_content
 from .store import StateStore
 
@@ -36,8 +37,20 @@ class ProxyPoolService:
         self._last_healthcheck_started_at: str | None = None
         self._last_healthcheck_finished_at: str | None = None
 
+    def _is_registration_cooled_down(self, node: NodeRecord, now: datetime | None = None) -> bool:
+        cooldown_until = _iso_to_dt(node.registration_cooldown_until)
+        if cooldown_until is None:
+            return False
+        current = now or datetime.now(timezone.utc)
+        return cooldown_until > current
+
     def _eligible_nodes(self, state: AppState) -> list[NodeRecord]:
-        return [node for node in state.nodes if node.enabled and node.pool_enabled and node.bound_port]
+        now = datetime.now(timezone.utc)
+        return [
+            node
+            for node in state.nodes
+            if node.enabled and node.pool_enabled and node.bound_port and not self._is_registration_cooled_down(node, now)
+        ]
 
     def _running_nodes(self, state: AppState) -> list[NodeRecord]:
         return [node for node in state.nodes if node.runtime_state == "running" and node.bound_port]
@@ -55,6 +68,82 @@ class ProxyPoolService:
         shuffled = list(nodes)
         random.shuffle(shuffled)
         return shuffled
+
+    def _find_node_by_bound_port(self, state: AppState, bound_port: int | None) -> NodeRecord | None:
+        if not bound_port:
+            return None
+        return next((node for node in state.nodes if node.bound_port == bound_port), None)
+
+    def _resolve_report_bound_port(self, payload: RegistrationCallbackPayload) -> int | None:
+        try:
+            parsed = urlparse(payload.proxy_url)
+            return parsed.port
+        except (ValueError, AttributeError):
+            return None
+
+    def _resolve_report_node(self, state: AppState, payload: RegistrationCallbackPayload) -> NodeRecord | None:
+        return self._find_node_by_bound_port(state, self._resolve_report_bound_port(payload))
+
+    def record_registration_callback(self, payload: RegistrationCallbackPayload) -> NodeRecord:
+        snapshot = self.store.snapshot()
+        matched = self._resolve_report_node(snapshot, payload)
+        if not matched:
+            raise KeyError("no proxy node matched the callback payload")
+
+        updated_node: NodeRecord | None = None
+        stop_node_id: str | None = None
+        now_iso = utc_now()
+        threshold = max(0, int(settings.registration_fail_threshold))
+        cooldown_secs = max(0, int(settings.registration_cooldown_secs))
+
+        def mutator(state: AppState) -> None:
+            nonlocal updated_node, stop_node_id
+            for node in state.nodes:
+                if node.id != matched.id:
+                    continue
+                node.registration_last_result_at = now_iso
+                if payload.status == "success":
+                    node.registration_success_count += 1
+                    node.registration_consecutive_failures = 0
+                    node.registration_cooldown_until = None
+                else:
+                    node.registration_failed_count += 1
+                    node.registration_consecutive_failures += 1
+                    if threshold > 0 and node.registration_consecutive_failures >= threshold and cooldown_secs > 0:
+                        cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown_secs)
+                        node.registration_cooldown_until = cooldown_until.isoformat()
+                        if node.runtime_state == "running":
+                            node.runtime_state = "stopped"
+                            node.lease_expires_at = None
+                            stop_node_id = node.id
+                updated_node = node.model_copy(deep=True)
+                break
+
+        self.store.update(mutator)
+        if stop_node_id:
+            self.engine.stop_node(stop_node_id)
+        assert updated_node is not None
+        return updated_node
+
+    def _release_registration_cooldowns(self) -> AppState:
+        now = datetime.now(timezone.utc)
+        snapshot = self.store.snapshot()
+        released_ids = [
+            node.id
+            for node in snapshot.nodes
+            if node.registration_cooldown_until and not self._is_registration_cooled_down(node, now)
+        ]
+        if not released_ids:
+            return snapshot
+
+        def mutator(state: AppState) -> None:
+            for node in state.nodes:
+                if node.id not in released_ids:
+                    continue
+                node.registration_cooldown_until = None
+                node.registration_consecutive_failures = 0
+
+        return self.store.update(mutator)
 
     def _assign_ports(self, reset_runtime: bool = False) -> AppState:
         snapshot = self.store.snapshot()
@@ -88,6 +177,7 @@ class ProxyPoolService:
         while True:
             try:
                 self._expire_old_leases()
+                self._release_registration_cooldowns()
                 await self._maybe_run_periodic_healthcheck()
             except Exception:
                 logger.exception("maintenance loop failed")
@@ -265,17 +355,21 @@ class ProxyPoolService:
     def status(self) -> dict:
         state = self.store.snapshot()
         eligible_nodes = self._eligible_nodes(state)
+        cooling_nodes = len([n for n in state.nodes if self._is_registration_cooled_down(n)])
         return {
             "subscriptions": len(state.subscriptions),
             "nodes": len(state.nodes),
             "pool_enabled_nodes": len([n for n in state.nodes if n.pool_enabled and n.enabled]),
             "assigned_nodes": len([n for n in state.nodes if n.bound_port]),
+            "cooling_nodes": cooling_nodes,
             "running_nodes": len(self._running_nodes(state)),
             "healthy_running_nodes": len([n for n in self._running_nodes(state) if n.healthy is True]),
             "engine": self.engine.status(),
             "strategy": settings.strategy,
             "base_port": settings.base_port,
             "lease_ttl_secs": settings.lease_ttl_secs,
+            "registration_fail_threshold": settings.registration_fail_threshold,
+            "registration_cooldown_secs": settings.registration_cooldown_secs,
             "healthcheck_running": self._healthcheck_running,
             "last_healthcheck_started_at": self._last_healthcheck_started_at,
             "last_healthcheck_finished_at": self._last_healthcheck_finished_at,

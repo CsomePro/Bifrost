@@ -52,6 +52,11 @@ class NodeRecord(BaseModel):
     runtime_state: Literal["stopped", "running"] = "stopped"
     lease_expires_at: Optional[str] = None
     last_allocated_at: Optional[str] = None
+    registration_success_count: int = 0
+    registration_failed_count: int = 0
+    registration_consecutive_failures: int = 0
+    registration_last_result_at: Optional[str] = None
+    registration_cooldown_until: Optional[str] = None
 
 
 class AppState(BaseModel):
@@ -81,3 +86,8 @@ class NodeBulkUpdateRequest(BaseModel):
     node_ids: list[str]
     pool_enabled: Optional[bool] = None
     enabled: Optional[bool] = None
+
+
+class RegistrationCallbackPayload(BaseModel):
+    proxy_url: str
+    status: Literal["success", "failure"]
